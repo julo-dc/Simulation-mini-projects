@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sheep vs Wolf Population Simulation</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            padding: 10px;
+            overflow: hidden;
+        }
+
+        .container {
+            max-width: 100%;
+            height: 100%;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+
+        .header h1 {
+            font-size: 1.5em;
+            margin-bottom: 5px;
+        }
+
+        .header p {
+            font-size: 0.85em;
+            opacity: 0.9;
+        }
+
+        .content {
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 0;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        .controls {
+            background: #f8f9fa;
+            padding: 15px;
+            border-right: 1px solid #e0e0e0;
+            overflow-y: auto;
+        }
+
+        .controls h2 {
+            color: #333;
+            margin-bottom: 12px;
+            font-size: 1.2em;
+        }
+
+        .control-group {
+            margin-bottom: 12px;
+        }
+
+        .control-group label {
+            display: block;
+            margin-bottom: 4px;
+            color: #555;
+            font-weight: 600;
+            font-size: 0.8em;
+        }
+
+        .control-group input[type="number"] {
+            width: 100%;
+            padding: 6px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.9em;
+            transition: border-color 0.3s;
+        }
+
+        .control-group input[type="number"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .control-group .hint {
+            font-size: 0.7em;
+            color: #888;
+            margin-top: 2px;
+        }
+
+        .button-group {
+            margin-top: 15px;
+        }
+
+        button {
+            width: 100%;
+            padding: 10px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.95em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .scenario-btn {
+            width: 100%;
+            padding: 8px;
+            background: #e8f4f8;
+            color: #333;
+            border: 2px solid #667eea;
+            border-radius: 6px;
+            font-size: 0.8em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .scenario-btn:hover {
+            background: #667eea;
+            color: white;
+            transform: translateY(-1px);
+        }
+
+        .visualization {
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chart-container {
+            position: relative;
+            flex: 1;
+            min-height: 0;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 10px;
+            margin-top: 10px;
+            flex-shrink: 0;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-card h3 {
+            font-size: 0.7em;
+            opacity: 0.9;
+            margin-bottom: 5px;
+        }
+
+        .stat-card .value {
+            font-size: 1.3em;
+            font-weight: bold;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 50px;
+            color: #666;
+            font-size: 1.2em;
+        }
+
+        .error {
+            background: #fee;
+            color: #c33;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        @media (max-width: 968px) {
+            .content {
+                grid-template-columns: 1fr;
+            }
+
+            .controls {
+                border-right: none;
+                border-bottom: 1px solid #e0e0e0;
+                max-height: 40vh;
+            }
+
+            .stats {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🐑 Sheep vs 🐺 Wolf Population Simulation</h1>
+            <p>Explore predator-prey dynamics using SimPy discrete-event simulation</p>
+        </div>
+
+        <div class="content">
+            <div class="controls">
+                <h2>Simulation Parameters</h2>
+
+                <div class="control-group">
+                    <label for="initial_sheep">Initial Sheep Population</label>
+                    <input type="number" id="initial_sheep" value="100" min="1" max="1000">
+                    <div class="hint">Starting number of sheep (typical: 40-200)</div>
+                </div>
+
+                <div class="control-group">
+                    <label for="initial_wolves">Initial Wolf Population</label>
+                    <input type="number" id="initial_wolves" value="20" min="1" max="200">
+                    <div class="hint">Starting number of wolves (typical: 10-50)</div>
+                </div>
+
+                <div class="control-group">
+                    <label for="sheep_birth_rate">Sheep Birth Rate</label>
+                    <input type="number" id="sheep_birth_rate" value="0.6" min="0" max="2" step="0.01">
+                    <div class="hint">Annual reproduction rate (real: 0.5-0.75 per ewe)</div>
+                </div>
+
+                <div class="control-group">
+                    <label for="sheep_lifespan">Sheep Lifespan</label>
+                    <input type="number" id="sheep_lifespan" value="11" min="1" max="50" step="0.5">
+                    <div class="hint">Expected lifespan in years (real: 10-12 years)</div>
+                </div>
+
+                <div class="control-group">
+                    <label for="conversion_efficiency">Conversion Efficiency</label>
+                    <input type="number" id="conversion_efficiency" value="0.2" min="0" max="0.2" step="0.001">
+                    <div class="hint">Sheep eaten → wolf offspring</div>
+                </div>
+
+                <div class="control-group">
+                    <label for="wolf_lifespan">Wolf Lifespan</label>
+                    <input type="number" id="wolf_lifespan" value="13" min="1" max="50" step="0.5">
+                    <div class="hint">Expected lifespan in years (real: 12-14 years)</div>
+                </div>
+
+                <div class="control-group">
+                    <label for="predation_rate">Predation Rate</label>
+                    <input type="number" id="predation_rate" value="0.1" min="0" max="1" step="0.01">
+                    <div class="hint">Combined attack rate and handling time (Holling Type II)</div>
+                </div>
+
+                <div class="control-group">
+                    <label for="carrying_capacity">Carrying Capacity</label>
+                    <input type="number" id="carrying_capacity" value="800" min="10" max="5000">
+                    <div class="hint">Maximum sustainable sheep population (optimized for oscillations)</div>
+                </div>
+
+                <div class="control-group">
+                    <label for="refuge_size">Prey Refuge Size</label>
+                    <input type="number" id="refuge_size" value="10" min="0" max="100" step="1">
+                    <div class="hint">Sheep safe from predation (prevents total extinction)</div>
+                </div>
+
+                <div class="control-group">
+                    <label for="duration">Simulation Duration</label>
+                    <input type="number" id="duration" value="500" min="10" max="500">
+                    <div class="hint">Years to simulate</div>
+                </div>
+
+                <div class="control-group">
+                    <label for="num_runs">Number of Runs</label>
+                    <input type="number" id="num_runs" value="1" min="1" max="100">
+                    <div class="hint">Average results across runs (more = smoother, slower)</div>
+                </div>
+
+                <div class="control-group" style="grid-column: span 2;">
+                    <label style="display: flex; align-items: center; cursor: pointer;">
+                        <input type="checkbox" id="showAdvancedParams" style="margin-right: 8px; width: 16px; height: 16px; cursor: pointer;">
+                        <span>Show Advanced Parameters</span>
+                    </label>
+                </div>
+
+                <div id="advancedParams" style="display: none; grid-column: span 2; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    <div class="control-group">
+                        <label for="disease_factor">Disease Factor</label>
+                        <input type="number" id="disease_factor" value="0.0" min="0" max="0.5" step="0.01">
+                        <div class="hint">Additional mortality from disease/parasites (0-0.5)</div>
+                    </div>
+
+                    <div class="control-group">
+                        <label for="environmental_stress">Environmental Stress</label>
+                        <input type="number" id="environmental_stress" value="0.0" min="0" max="1" step="0.01">
+                        <div class="hint">Stress factor affecting both populations (0-1)</div>
+                    </div>
+
+                    <div class="control-group">
+                        <label for="sheep_competition">Sheep Competition</label>
+                        <input type="number" id="sheep_competition" value="0.0" min="0" max="0.1" step="0.001">
+                        <div class="hint">Intraspecific competition coefficient</div>
+                    </div>
+
+                    <div class="control-group">
+                        <label for="wolf_competition">Wolf Competition</label>
+                        <input type="number" id="wolf_competition" value="0.0" min="0" max="0.1" step="0.001">
+                        <div class="hint">Intraspecific competition coefficient</div>
+                    </div>
+
+                    <div class="control-group">
+                        <label for="migration_rate">Migration Rate</label>
+                        <input type="number" id="migration_rate" value="0.0" min="-0.2" max="0.2" step="0.01">
+                        <div class="hint">Net migration rate (positive = immigration)</div>
+                    </div>
+                </div>
+
+                <div class="button-group">
+                    <button id="runSimulation">Run Simulation</button>
+                </div>
+
+                <div id="yearRange" style="margin-top: 10px; padding: 8px; background: #f0f0f0; border-radius: 6px; font-size: 0.85em; text-align: center; color: #666;">
+                    Simulation will run from <strong id="startYear">1926</strong> to <strong>2026</strong>
+                </div>
+            </div>
+
+            <div class="visualization">
+                <div id="errorMessage" class="error" style="display: none;"></div>
+                <div class="chart-container">
+                    <canvas id="populationChart"></canvas>
+                </div>
+                <div class="stats" id="statsContainer"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let chart = null;
+
+        // Update year range display when duration changes
+        function updateYearRange() {
+            const duration = parseInt(document.getElementById('duration').value) || 100;
+            const startYear = 2026 - duration;
+            document.getElementById('startYear').textContent = startYear;
+        }
+
+        function getFormData() {
+            return {
+                initial_sheep: parseInt(document.getElementById('initial_sheep').value),
+                initial_wolves: parseInt(document.getElementById('initial_wolves').value),
+                sheep_birth_rate: parseFloat(document.getElementById('sheep_birth_rate').value),
+                sheep_lifespan: parseFloat(document.getElementById('sheep_lifespan').value),
+                conversion_efficiency: parseFloat(document.getElementById('conversion_efficiency').value),
+                wolf_lifespan: parseFloat(document.getElementById('wolf_lifespan').value),
+                predation_rate: parseFloat(document.getElementById('predation_rate').value),
+                carrying_capacity: parseInt(document.getElementById('carrying_capacity').value),
+                refuge_size: parseFloat(document.getElementById('refuge_size').value),
+                disease_factor: parseFloat(document.getElementById('disease_factor').value),
+                environmental_stress: parseFloat(document.getElementById('environmental_stress').value),
+                sheep_competition: parseFloat(document.getElementById('sheep_competition').value),
+                wolf_competition: parseFloat(document.getElementById('wolf_competition').value),
+                migration_rate: parseFloat(document.getElementById('migration_rate').value),
+                duration: parseInt(document.getElementById('duration').value),
+                num_runs: parseInt(document.getElementById('num_runs').value)
+            };
+        }
+
+        function getFormData() {
+            return {
+                initial_sheep: parseInt(document.getElementById('initial_sheep').value),
+                initial_wolves: parseInt(document.getElementById('initial_wolves').value),
+                sheep_birth_rate: parseFloat(document.getElementById('sheep_birth_rate').value),
+                sheep_lifespan: parseFloat(document.getElementById('sheep_lifespan').value),
+                conversion_efficiency: parseFloat(document.getElementById('conversion_efficiency').value),
+                wolf_lifespan: parseFloat(document.getElementById('wolf_lifespan').value),
+                predation_rate: parseFloat(document.getElementById('predation_rate').value),
+                carrying_capacity: parseInt(document.getElementById('carrying_capacity').value),
+                refuge_size: parseFloat(document.getElementById('refuge_size').value),
+                disease_factor: parseFloat(document.getElementById('disease_factor').value),
+                environmental_stress: parseFloat(document.getElementById('environmental_stress').value),
+                sheep_competition: parseFloat(document.getElementById('sheep_competition').value),
+                wolf_competition: parseFloat(document.getElementById('wolf_competition').value),
+                migration_rate: parseFloat(document.getElementById('migration_rate').value),
+                duration: parseInt(document.getElementById('duration').value),
+                num_runs: parseInt(document.getElementById('num_runs').value)
+            };
+        }
+
+        function hideError() {
+            document.getElementById('errorMessage').style.display = 'none';
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('errorMessage');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+
+        function updateChart(data) {
+            const ctx = document.getElementById('populationChart').getContext('2d');
+            
+            // Extract times and ensure they're calendar years (already converted in backend)
+            const times = data.map(d => d.time);
+            // Round to integers and handle extinction
+            const sheep = data.map(d => Math.round(d.sheep));
+            const wolves = data.map(d => Math.round(d.wolves));
+
+            if (chart) {
+                chart.destroy();
+            }
+
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: times,
+                    datasets: [
+                        {
+                            label: 'Sheep Population',
+                            data: sheep,
+                            borderColor: 'rgb(75, 192, 192)',
+                            backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                            tension: 0.4,
+                            fill: true
+                        },
+                        {
+                            label: 'Wolf Population',
+                            data: wolves,
+                            borderColor: 'rgb(255, 99, 132)',
+                            backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                            tension: 0.4,
+                            fill: true
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Year',
+                                font: {
+                                    size: 11
+                                }
+                            },
+                            ticks: {
+                                font: {
+                                    size: 10
+                                },
+                                callback: function(value, index, ticks) {
+                                    // Use the actual year value from the labels array
+                                    if (index >= 0 && index < times.length) {
+                                        const year = times[index];
+                                        if (year !== undefined && !isNaN(year)) {
+                                            return Math.round(year);
+                                        }
+                                    }
+                                    // Fallback: use the value directly if it's already a year
+                                    return Math.round(value);
+                                },
+                                maxTicksLimit: 20  // Limit number of ticks for readability
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Population',
+                                font: {
+                                    size: 11
+                                }
+                            },
+                            beginAtZero: true,
+                            ticks: {
+                                font: {
+                                    size: 10
+                                }
+                            }
+                        }
+                    },
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'Population Evolution Over Years',
+                            font: {
+                                size: 14
+                            }
+                        },
+                        legend: {
+                            display: true,
+                            position: 'top',
+                            labels: {
+                                font: {
+                                    size: 11
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateStats(data) {
+            const statsContainer = document.getElementById('statsContainer');
+            
+            if (data.length === 0) {
+                statsContainer.innerHTML = '';
+                return;
+            }
+
+            // Round to integers
+            const finalSheep = Math.round(data[data.length - 1].sheep);
+            const finalWolves = Math.round(data[data.length - 1].wolves);
+            const maxSheep = Math.round(Math.max(...data.map(d => d.sheep)));
+            const maxWolves = Math.round(Math.max(...data.map(d => d.wolves)));
+            const minSheep = Math.round(Math.min(...data.map(d => d.sheep)));
+            const minWolves = Math.round(Math.min(...data.map(d => d.wolves)));
+
+            // Check for extinction
+            const sheepExtinct = finalSheep === 0;
+            const wolvesExtinct = finalWolves === 0;
+
+            statsContainer.innerHTML = `
+                <div class="stat-card">
+                    <h3>Final Sheep Population</h3>
+                    <div class="value">${sheepExtinct ? 'Extinct' : finalSheep}</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Final Wolf Population</h3>
+                    <div class="value">${wolvesExtinct ? 'Extinct' : finalWolves}</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Peak Sheep Population</h3>
+                    <div class="value">${maxSheep}</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Peak Wolf Population</h3>
+                    <div class="value">${maxWolves}</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Min Sheep Population</h3>
+                    <div class="value">${minSheep}</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Min Wolf Population</h3>
+                    <div class="value">${minWolves}</div>
+                </div>
+            `;
+        }
+
+        async function runSimulation() {
+            const button = document.getElementById('runSimulation');
+            const params = getFormData();
+            const numRuns = params.num_runs;
+            button.disabled = true;
+            button.textContent = `Running ${numRuns} simulation${numRuns > 1 ? 's' : ''}...`;
+            hideError();
+
+            try {
+                const response = await fetch('/api/simulate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(params)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                updateChart(data);
+                updateStats(data);
+            } catch (error) {
+                showError('Error running simulation: ' + error.message);
+                console.error('Error:', error);
+            } finally {
+                button.disabled = false;
+                button.textContent = 'Run Simulation';
+            }
+        }
+
+        document.getElementById('runSimulation').addEventListener('click', runSimulation);
+        
+        // Update year range when duration changes
+        document.getElementById('duration').addEventListener('input', updateYearRange);
+        
+        // Toggle advanced parameters visibility
+        document.getElementById('showAdvancedParams').addEventListener('change', function() {
+            const advancedParams = document.getElementById('advancedParams');
+            if (this.checked) {
+                advancedParams.style.display = 'grid';
+            } else {
+                advancedParams.style.display = 'none';
+            }
+        });
+        
+        // Initialize year range on page load
+        updateYearRange();
+
+        // Run initial simulation on page load
+        window.addEventListener('load', () => {
+            updateYearRange();
+            runSimulation();
+        });
+    </script>
+</body>
+</html>
+
