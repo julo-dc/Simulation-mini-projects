@@ -2,6 +2,7 @@ from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
 import simpy
 import math
+import random
 
 app = Flask(__name__)
 CORS(app)
@@ -14,7 +15,8 @@ class Ecosystem:
                  refuge_size=0.0,
                  disease_factor=0.0, environmental_stress=0.0, 
                  sheep_competition=0.0, wolf_competition=0.0,
-                 migration_rate=0.0):
+                 migration_rate=0.0,
+                 probabilistic=False, noise_level=0.15, rng=None):
         self.env = env
         self.sheep_count = float(initial_sheep)
         self.wolf_count = float(initial_wolves)
@@ -31,12 +33,46 @@ class Ecosystem:
         self.sheep_competition = sheep_competition  # Intraspecific competition for sheep
         self.wolf_competition = wolf_competition  # Intraspecific competition for wolves
         self.migration_rate = migration_rate  # Net migration rate
+        self.probabilistic = bool(probabilistic)
+        self.noise_level = max(0.0, float(noise_level))
+        self.rng = rng if rng is not None else random.Random()
         self.history = []
         self.dt = 0.01  # Time step for numerical integration (100 steps per year)
         
         # Track average age of populations (in years)
         self.sheep_avg_age = 0.0  # Start with newborns
         self.wolf_avg_age = 0.0  # Start with newborns
+
+        # Environmental stochasticity multipliers (resampled each year when probabilistic)
+        self.birth_multiplier = 1.0
+        self.predation_multiplier = 1.0
+        self.mortality_multiplier = 1.0
+        self.stress_multiplier = 1.0
+        self.conversion_multiplier = 1.0
+
+    def _lognormal_multiplier(self, sigma):
+        """Draw a mean-1 lognormal multiplier for environmental noise."""
+        if sigma <= 0:
+            return 1.0
+        # lognormal with E[X]=1: mu = -0.5 * sigma^2
+        return self.rng.lognormvariate(-0.5 * sigma * sigma, sigma)
+
+    def resample_environmental_noise(self):
+        """Resample yearly environmental shocks applied to ecological rates."""
+        if not self.probabilistic or self.noise_level <= 0:
+            self.birth_multiplier = 1.0
+            self.predation_multiplier = 1.0
+            self.mortality_multiplier = 1.0
+            self.stress_multiplier = 1.0
+            self.conversion_multiplier = 1.0
+            return
+
+        sigma = self.noise_level
+        self.birth_multiplier = self._lognormal_multiplier(sigma)
+        self.predation_multiplier = self._lognormal_multiplier(sigma)
+        self.mortality_multiplier = self._lognormal_multiplier(sigma * 0.75)
+        self.stress_multiplier = self._lognormal_multiplier(sigma)
+        self.conversion_multiplier = self._lognormal_multiplier(sigma * 0.5)
         
     def calculate_predation_rate(self, sheep, wolves):
         """Calculate predation rate using Holling Type II functional response with prey refuge
@@ -55,8 +91,9 @@ class Ecosystem:
         
         # Holling Type II: saturation occurs as effective sheep density increases
         # Using combined predation_rate parameter with fixed handling_time
+        effective_predation_rate = self.predation_rate * self.predation_multiplier
         denominator = 1.0 + self.handling_time * effective_sheep
-        predation = (self.predation_rate * effective_sheep * wolves) / denominator
+        predation = (effective_predation_rate * effective_sheep * wolves) / denominator
         
         # Ensure predation doesn't exceed available effective sheep
         return min(predation, effective_sheep)
@@ -96,21 +133,22 @@ class Ecosystem:
         logistic_growth = 0.0
         # If population <= 1, cannot reproduce and will go extinct
         if sheep > 1 and self.carrying_capacity > 0:
-            logistic_growth = self.sheep_birth_rate * sheep * (1.0 - sheep / self.carrying_capacity)
+            effective_birth_rate = self.sheep_birth_rate * self.birth_multiplier
+            logistic_growth = effective_birth_rate * sheep * (1.0 - sheep / self.carrying_capacity)
             logistic_growth = max(0.0, logistic_growth)  # Ensure non-negative
         
         # Age-based mortality using logistic function
         sheep_mortality_rate = self.calculate_age_based_mortality(self.sheep_avg_age, self.sheep_lifespan)
-        sheep_death = sheep * sheep_mortality_rate
+        sheep_death = sheep * sheep_mortality_rate * self.mortality_multiplier
         
         # Disease mortality
-        disease_death = sheep * self.disease_factor
+        disease_death = sheep * self.disease_factor * self.mortality_multiplier
         
         # Intraspecific competition (density-dependent mortality)
         competition_death = self.sheep_competition * sheep * sheep
         
         # Environmental stress
-        stress_death = sheep * self.environmental_stress * 0.5
+        stress_death = sheep * self.environmental_stress * self.stress_multiplier * 0.5
         
         # Calculate predation rate using Holling Type II with refuge
         predation_rate = self.calculate_predation_rate(sheep, wolves)
@@ -127,23 +165,23 @@ class Ecosystem:
         # If wolves are not eating sheep (predation_rate == 0), they die off
         wolf_birth = 0.0
         if wolves > 1 and predation_rate > 0:
-            wolf_birth = predation_rate * self.conversion_efficiency
+            wolf_birth = predation_rate * self.conversion_efficiency * self.conversion_multiplier
         
         wolf_mortality_rate = self.calculate_age_based_mortality(self.wolf_avg_age, self.wolf_lifespan)
-        wolf_death = wolves * wolf_mortality_rate
+        wolf_death = wolves * wolf_mortality_rate * self.mortality_multiplier
         
         # If wolves are not eating sheep, they die off (starvation)
         if predation_rate == 0 and wolves > 0:
             wolf_death = wolves  # All wolves die from starvation
         
         # Disease mortality
-        wolf_disease_death = wolves * self.disease_factor
+        wolf_disease_death = wolves * self.disease_factor * self.mortality_multiplier
         
         # Intraspecific competition (territory competition)
         wolf_competition_death = self.wolf_competition * wolves * wolves
         
         # Environmental stress
-        wolf_stress_death = wolves * self.environmental_stress * 0.5
+        wolf_stress_death = wolves * self.environmental_stress * self.stress_multiplier * 0.5
         
         # Migration (net immigration/emigration)
         wolf_migration = wolves * self.migration_rate
@@ -151,6 +189,14 @@ class Ecosystem:
         dWolf = wolf_birth - wolf_death - wolf_disease_death - wolf_competition_death - wolf_stress_death + wolf_migration
         
         return (dSheep, dWolf)
+
+    def apply_demographic_noise(self, population):
+        """Add demographic stochasticity: dN += sigma * sqrt(N) * dW"""
+        if not self.probabilistic or self.noise_level <= 0 or population <= 0:
+            return population
+        # Scale noise so yearly variance is roughly noise_level^2 * N
+        shock = self.rng.gauss(0.0, self.noise_level * math.sqrt(population * self.dt))
+        return max(0.0, population + shock)
     
     def runge_kutta_step(self, sheep, wolves):
         """Perform one Runge-Kutta 4 (RK4) integration step
@@ -187,6 +233,10 @@ class Ecosystem:
         # Update populations
         new_sheep = max(0.0, sheep + dSheep)
         new_wolves = max(0.0, wolves + dWolf)
+
+        # Demographic stochasticity after the deterministic drift step
+        new_sheep = self.apply_demographic_noise(new_sheep)
+        new_wolves = self.apply_demographic_noise(new_wolves)
         
         return (new_sheep, new_wolves)
     
@@ -195,6 +245,9 @@ class Ecosystem:
         steps_per_year = int(1.0 / self.dt)  # 100 steps per year (dt=0.01)
         
         while True:
+            # Resample environmental random variables once per year
+            self.resample_environmental_noise()
+
             # Run integration steps for one year
             for _ in range(steps_per_year):
                 # Perform RK4 step
@@ -208,7 +261,8 @@ class Ecosystem:
                     # Estimate birth rate for age tracking
                     logistic_growth = 0.0
                     if self.sheep_count > 1 and self.carrying_capacity > 0:
-                        logistic_growth = self.sheep_birth_rate * self.sheep_count * (1.0 - self.sheep_count / self.carrying_capacity)
+                        effective_birth_rate = self.sheep_birth_rate * self.birth_multiplier
+                        logistic_growth = effective_birth_rate * self.sheep_count * (1.0 - self.sheep_count / self.carrying_capacity)
                         logistic_growth = max(0.0, logistic_growth)
                     
                     birth_fraction = (logistic_growth * self.dt) / max(self.sheep_count, 1.0)
@@ -220,7 +274,7 @@ class Ecosystem:
                     predation_rate = self.calculate_predation_rate(self.sheep_count, self.wolf_count)
                     wolf_birth = 0.0
                     if self.wolf_count > 1 and predation_rate > 0:
-                        wolf_birth = predation_rate * self.conversion_efficiency
+                        wolf_birth = predation_rate * self.conversion_efficiency * self.conversion_multiplier
                     
                     birth_fraction = (wolf_birth * self.dt) / max(self.wolf_count, 1.0)
                     self.wolf_avg_age = (1.0 - birth_fraction) * (self.wolf_avg_age + self.dt) + birth_fraction * 0.0
@@ -270,7 +324,8 @@ def run_simulation(initial_sheep=100, initial_wolves=20,
                   refuge_size=10.0,
                   duration=500, disease_factor=0.0, 
                   environmental_stress=0.0, sheep_competition=0.0,
-                  wolf_competition=0.0, migration_rate=0.0):
+                  wolf_competition=0.0, migration_rate=0.0,
+                  probabilistic=False, noise_level=0.15, seed=None):
     """Run the simulation using Modified Lotka-Volterra system
     
     Parameters (based on real-world ecological data):
@@ -282,8 +337,12 @@ def run_simulation(initial_sheep=100, initial_wolves=20,
     - carrying_capacity: Maximum sustainable sheep population
     - refuge_size: Prey refuge - sheep below this count are safe from predation
     - duration: Simulation duration in years
+    - probabilistic: If True, apply environmental and demographic random variables
+    - noise_level: Intensity of stochastic noise (typical: 0.05-0.4)
+    - seed: Optional RNG seed for reproducible probabilistic runs
     """
     env = simpy.Environment()
+    rng = random.Random(seed)
     ecosystem = Ecosystem(
         env, initial_sheep, initial_wolves,
         sheep_birth_rate, conversion_efficiency,
@@ -292,7 +351,10 @@ def run_simulation(initial_sheep=100, initial_wolves=20,
         refuge_size,
         disease_factor, environmental_stress,
         sheep_competition, wolf_competition,
-        migration_rate
+        migration_rate,
+        probabilistic=probabilistic,
+        noise_level=noise_level,
+        rng=rng
     )
     
     # Determine recording interval based on duration
@@ -358,10 +420,22 @@ def simulate():
     migration_rate = float(data.get('migration_rate', 0.0))
     duration = int(data.get('duration', 500))
     num_runs = int(data.get('num_runs', 1))
+    probabilistic = bool(data.get('probabilistic', False))
+    noise_level = float(data.get('noise_level', 0.15))
+    seed = data.get('seed', None)
+    if seed is not None and seed != '':
+        seed = int(seed)
+    else:
+        seed = None
+
+    # Deterministic mode: multiple runs are identical, so skip redundant work
+    if not probabilistic:
+        num_runs = 1
     
     # Run multiple simulations and average results
     all_runs = []
-    for _ in range(num_runs):
+    for run_idx in range(num_runs):
+        run_seed = None if seed is None else seed + run_idx
         results = run_simulation(
             initial_sheep=initial_sheep,
             initial_wolves=initial_wolves,
@@ -377,29 +451,47 @@ def simulate():
             environmental_stress=environmental_stress,
             sheep_competition=sheep_competition,
             wolf_competition=wolf_competition,
-            migration_rate=migration_rate
+            migration_rate=migration_rate,
+            probabilistic=probabilistic,
+            noise_level=noise_level,
+            seed=run_seed
         )
         all_runs.append(results)
     
-    # Average across runs (round to nearest integer)
+    # Average across runs (round to nearest integer); include std when probabilistic ensemble
     if num_runs == 1:
         averaged_results = all_runs[0]
     else:
-        # Initialize averaged results - ensure we have the same time points
         averaged_results = []
-        # Use the first run's time structure as reference
         reference_times = [entry['time'] for entry in all_runs[0]]
         
         for i, ref_time in enumerate(reference_times):
-            avg_sheep = sum(run[i]['sheep'] for run in all_runs) / num_runs
-            avg_wolves = sum(run[i]['wolves'] for run in all_runs) / num_runs
+            sheep_vals = [run[i]['sheep'] for run in all_runs]
+            wolf_vals = [run[i]['wolves'] for run in all_runs]
+            avg_sheep = sum(sheep_vals) / num_runs
+            avg_wolves = sum(wolf_vals) / num_runs
+            if num_runs > 1:
+                sheep_var = sum((v - avg_sheep) ** 2 for v in sheep_vals) / num_runs
+                wolf_var = sum((v - avg_wolves) ** 2 for v in wolf_vals) / num_runs
+                sheep_std = math.sqrt(sheep_var)
+                wolf_std = math.sqrt(wolf_var)
+            else:
+                sheep_std = 0.0
+                wolf_std = 0.0
             averaged_results.append({
-                'time': int(ref_time),  # Preserve calendar year
+                'time': int(ref_time),
                 'sheep': int(round(avg_sheep)),
-                'wolves': int(round(avg_wolves))
+                'wolves': int(round(avg_wolves)),
+                'sheep_std': round(sheep_std, 2),
+                'wolves_std': round(wolf_std, 2)
             })
     
-    return jsonify(averaged_results)
+    return jsonify({
+        'series': averaged_results,
+        'probabilistic': probabilistic,
+        'noise_level': noise_level,
+        'num_runs': num_runs
+    })
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
