@@ -7,342 +7,387 @@ import random
 app = Flask(__name__)
 CORS(app)
 
+# Model parameters that can be drawn from a user-chosen distribution.
+SAMPLABLE_PARAMS = (
+    'initial_sheep',
+    'initial_wolves',
+    'sheep_birth_rate',
+    'conversion_efficiency',
+    'sheep_lifespan',
+    'wolf_lifespan',
+    'predation_rate',
+    'carrying_capacity',
+    'refuge_size',
+    'disease_factor',
+    'environmental_stress',
+    'sheep_competition',
+    'wolf_competition',
+    'migration_rate',
+)
+
+PARAM_DEFAULTS = {
+    'initial_sheep': 100,
+    'initial_wolves': 20,
+    'sheep_birth_rate': 0.6,
+    'conversion_efficiency': 0.2,
+    'sheep_lifespan': 11.0,
+    'wolf_lifespan': 13.0,
+    'predation_rate': 0.1,
+    'carrying_capacity': 800,
+    'refuge_size': 10.0,
+    'disease_factor': 0.0,
+    'environmental_stress': 0.0,
+    'sheep_competition': 0.0,
+    'wolf_competition': 0.0,
+    'migration_rate': 0.0,
+}
+
+# Soft bounds used when clamping sampled values.
+PARAM_BOUNDS = {
+    'initial_sheep': (1, 5000),
+    'initial_wolves': (1, 2000),
+    'sheep_birth_rate': (0.0, 5.0),
+    'conversion_efficiency': (0.0, 1.0),
+    'sheep_lifespan': (0.1, 100.0),
+    'wolf_lifespan': (0.1, 100.0),
+    'predation_rate': (0.0, 5.0),
+    'carrying_capacity': (1, 20000),
+    'refuge_size': (0.0, 5000.0),
+    'disease_factor': (0.0, 1.0),
+    'environmental_stress': (0.0, 1.0),
+    'sheep_competition': (0.0, 1.0),
+    'wolf_competition': (0.0, 1.0),
+    'migration_rate': (-1.0, 1.0),
+}
+
+INTEGER_PARAMS = {'initial_sheep', 'initial_wolves', 'carrying_capacity'}
+
+
+def _as_float(value, default=0.0):
+    try:
+        if value is None or value == '':
+            return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _clamp(value, low, high):
+    if low is not None:
+        value = max(low, value)
+    if high is not None:
+        value = min(high, value)
+    return value
+
+
+def normalize_param_spec(name, raw):
+    """Normalize a parameter into {dist, ...args}.
+
+    Accepts either a bare number (fixed) or a distribution object.
+    """
+    default = PARAM_DEFAULTS[name]
+    if raw is None:
+        return {'dist': 'fixed', 'value': default}
+    if isinstance(raw, (int, float)):
+        return {'dist': 'fixed', 'value': float(raw)}
+    if not isinstance(raw, dict):
+        return {'dist': 'fixed', 'value': default}
+
+    dist = str(raw.get('dist', 'fixed')).lower().strip()
+    if dist in ('constant', 'deterministic', 'none', ''):
+        dist = 'fixed'
+
+    if dist == 'fixed':
+        return {'dist': 'fixed', 'value': _as_float(raw.get('value', default), default)}
+    if dist == 'uniform':
+        low = _as_float(raw.get('min', raw.get('low', default)), default)
+        high = _as_float(raw.get('max', raw.get('high', default)), default)
+        if high < low:
+            low, high = high, low
+        return {'dist': 'uniform', 'min': low, 'max': high}
+    if dist == 'normal':
+        return {
+            'dist': 'normal',
+            'mean': _as_float(raw.get('mean', default), default),
+            'std': max(0.0, _as_float(raw.get('std', 0.0), 0.0)),
+            'min': raw.get('min', None),
+            'max': raw.get('max', None),
+        }
+    if dist == 'lognormal':
+        # mu/sigma are parameters of the underlying normal for ln(X).
+        # If only mean/sigma are provided, convert mean to mu so E[X] ~= mean.
+        sigma = max(1e-12, _as_float(raw.get('sigma', raw.get('std', 0.1)), 0.1))
+        if 'mu' in raw and raw['mu'] is not None and raw['mu'] != '':
+            mu = _as_float(raw.get('mu'), math.log(max(default, 1e-12)))
+        else:
+            mean = max(1e-12, _as_float(raw.get('mean', default), default))
+            mu = math.log(mean) - 0.5 * sigma * sigma
+        return {
+            'dist': 'lognormal',
+            'mu': mu,
+            'sigma': sigma,
+            'min': raw.get('min', None),
+            'max': raw.get('max', None),
+        }
+    if dist == 'triangular':
+        low = _as_float(raw.get('min', raw.get('low', default)), default)
+        high = _as_float(raw.get('max', raw.get('high', default)), default)
+        mode = _as_float(raw.get('mode', default), default)
+        if high < low:
+            low, high = high, low
+        mode = _clamp(mode, low, high)
+        return {'dist': 'triangular', 'min': low, 'mode': mode, 'max': high}
+
+    return {'dist': 'fixed', 'value': default}
+
+
+def sample_param(name, spec, rng):
+    """Draw one value for a named parameter from its distribution spec."""
+    spec = normalize_param_spec(name, spec)
+    bound_low, bound_high = PARAM_BOUNDS[name]
+    dist = spec['dist']
+
+    if dist == 'fixed':
+        value = spec['value']
+    elif dist == 'uniform':
+        value = rng.uniform(spec['min'], spec['max'])
+    elif dist == 'normal':
+        value = rng.gauss(spec['mean'], spec['std'])
+        clip_min = spec['min'] if spec['min'] is not None and spec['min'] != '' else bound_low
+        clip_max = spec['max'] if spec['max'] is not None and spec['max'] != '' else bound_high
+        value = _clamp(value, _as_float(clip_min, bound_low), _as_float(clip_max, bound_high))
+    elif dist == 'lognormal':
+        value = rng.lognormvariate(spec['mu'], spec['sigma'])
+        clip_min = spec['min'] if spec['min'] is not None and spec['min'] != '' else bound_low
+        clip_max = spec['max'] if spec['max'] is not None and spec['max'] != '' else bound_high
+        value = _clamp(value, _as_float(clip_min, bound_low), _as_float(clip_max, bound_high))
+    elif dist == 'triangular':
+        value = rng.triangular(spec['min'], spec['max'], spec['mode'])
+    else:
+        value = PARAM_DEFAULTS[name]
+
+    value = _clamp(value, bound_low, bound_high)
+    if name in INTEGER_PARAMS:
+        return int(round(value))
+    return float(value)
+
+
+def is_random_spec(spec):
+    if isinstance(spec, dict):
+        return str(spec.get('dist', 'fixed')).lower() not in (
+            'fixed', 'constant', 'deterministic', 'none', ''
+        )
+    return False
+
+
+def sample_parameters(param_specs, rng):
+    """Sample a full parameter set for one simulation run."""
+    sampled = {}
+    for name in SAMPLABLE_PARAMS:
+        sampled[name] = sample_param(name, param_specs.get(name), rng)
+    return sampled
+
+
 class Ecosystem:
-    def __init__(self, env, initial_sheep, initial_wolves, 
+    def __init__(self, env, initial_sheep, initial_wolves,
                  sheep_birth_rate, conversion_efficiency,
                  sheep_lifespan, wolf_lifespan,
                  predation_rate, carrying_capacity,
                  refuge_size=0.0,
-                 disease_factor=0.0, environmental_stress=0.0, 
+                 disease_factor=0.0, environmental_stress=0.0,
                  sheep_competition=0.0, wolf_competition=0.0,
-                 migration_rate=0.0,
-                 probabilistic=False, noise_level=0.15, rng=None):
+                 migration_rate=0.0):
         self.env = env
         self.sheep_count = float(initial_sheep)
         self.wolf_count = float(initial_wolves)
         self.sheep_birth_rate = sheep_birth_rate
-        self.conversion_efficiency = conversion_efficiency  # How efficiently wolves convert eaten sheep into offspring
-        self.sheep_lifespan = sheep_lifespan  # Expected lifespan in years
-        self.wolf_lifespan = wolf_lifespan  # Expected lifespan in years
-        self.predation_rate = predation_rate  # Combined attack rate and handling time for Holling Type II
+        self.conversion_efficiency = conversion_efficiency
+        self.sheep_lifespan = sheep_lifespan
+        self.wolf_lifespan = wolf_lifespan
+        self.predation_rate = predation_rate
         self.carrying_capacity = carrying_capacity
-        self.handling_time = 0.1  # Fixed handling time for Holling Type II saturation
-        self.refuge_size = refuge_size  # Prey refuge - sheep below this count are safe from predation
-        self.disease_factor = disease_factor  # Additional mortality from disease
-        self.environmental_stress = environmental_stress  # Stress affecting both populations
-        self.sheep_competition = sheep_competition  # Intraspecific competition for sheep
-        self.wolf_competition = wolf_competition  # Intraspecific competition for wolves
-        self.migration_rate = migration_rate  # Net migration rate
-        self.probabilistic = bool(probabilistic)
-        self.noise_level = max(0.0, float(noise_level))
-        self.rng = rng if rng is not None else random.Random()
+        self.handling_time = 0.1
+        self.refuge_size = refuge_size
+        self.disease_factor = disease_factor
+        self.environmental_stress = environmental_stress
+        self.sheep_competition = sheep_competition
+        self.wolf_competition = wolf_competition
+        self.migration_rate = migration_rate
         self.history = []
-        self.dt = 0.01  # Time step for numerical integration (100 steps per year)
-        
-        # Track average age of populations (in years)
-        self.sheep_avg_age = 0.0  # Start with newborns
-        self.wolf_avg_age = 0.0  # Start with newborns
+        self.dt = 0.01
 
-        # Environmental stochasticity multipliers (resampled each year when probabilistic)
-        self.birth_multiplier = 1.0
-        self.predation_multiplier = 1.0
-        self.mortality_multiplier = 1.0
-        self.stress_multiplier = 1.0
-        self.conversion_multiplier = 1.0
+        self.sheep_avg_age = 0.0
+        self.wolf_avg_age = 0.0
 
-    def _lognormal_multiplier(self, sigma):
-        """Draw a mean-1 lognormal multiplier for environmental noise."""
-        if sigma <= 0:
-            return 1.0
-        # lognormal with E[X]=1: mu = -0.5 * sigma^2
-        return self.rng.lognormvariate(-0.5 * sigma * sigma, sigma)
-
-    def resample_environmental_noise(self):
-        """Resample yearly environmental shocks applied to ecological rates."""
-        if not self.probabilistic or self.noise_level <= 0:
-            self.birth_multiplier = 1.0
-            self.predation_multiplier = 1.0
-            self.mortality_multiplier = 1.0
-            self.stress_multiplier = 1.0
-            self.conversion_multiplier = 1.0
-            return
-
-        sigma = self.noise_level
-        self.birth_multiplier = self._lognormal_multiplier(sigma)
-        self.predation_multiplier = self._lognormal_multiplier(sigma)
-        self.mortality_multiplier = self._lognormal_multiplier(sigma * 0.75)
-        self.stress_multiplier = self._lognormal_multiplier(sigma)
-        self.conversion_multiplier = self._lognormal_multiplier(sigma * 0.5)
-        
     def calculate_predation_rate(self, sheep, wolves):
-        """Calculate predation rate using Holling Type II functional response with prey refuge
-        
-        Effective_Sheep = max(0, Sheep - Refuge_Size)
-        Predation_Rate = (Predation_Rate * Effective_Sheep * Wolf) / (1 + Handling_Time * Effective_Sheep)
-        """
+        """Holling Type II functional response with prey refuge."""
         if sheep <= 0 or wolves <= 0:
             return 0.0
-        
-        # Prey refuge: only sheep above refuge_size are vulnerable to predation
+
         effective_sheep = max(0.0, sheep - self.refuge_size)
-        
         if effective_sheep <= 0:
             return 0.0
-        
-        # Holling Type II: saturation occurs as effective sheep density increases
-        # Using combined predation_rate parameter with fixed handling_time
-        effective_predation_rate = self.predation_rate * self.predation_multiplier
+
         denominator = 1.0 + self.handling_time * effective_sheep
-        predation = (effective_predation_rate * effective_sheep * wolves) / denominator
-        
-        # Ensure predation doesn't exceed available effective sheep
+        predation = (self.predation_rate * effective_sheep * wolves) / denominator
         return min(predation, effective_sheep)
-    
+
     def calculate_age_based_mortality(self, age, lifespan):
-        """Calculate mortality rate using logistic function based on age
-        
-        Uses logistic function: mortality = 1 / (1 + exp(-k * (age - lifespan)))
-        where k controls the steepness of the mortality curve
-        """
+        """Logistic mortality rate based on age relative to lifespan."""
         if lifespan <= 0:
-            return 1.0  # If no lifespan, everything dies
-        
-        # Steepness parameter (higher = sharper transition at lifespan)
+            return 1.0
+
         k = 2.0
-        
-        # Logistic function: low mortality when young, increases as age approaches lifespan
-        # Normalize age relative to lifespan
         normalized_age = age / lifespan if lifespan > 0 else 1.0
-        
-        # Logistic function: gives ~0 when age << lifespan, ~1 when age >> lifespan
         mortality_rate = 1.0 / (1.0 + math.exp(-k * (normalized_age - 1.0)))
-        
-        # Scale to reasonable annual mortality rate (max 0.5 per year to prevent instant extinction)
         return min(mortality_rate * 0.5, 0.5)
-    
+
     def compute_derivatives(self, sheep, wolves):
-        """Compute derivatives dSheep/dt and dWolf/dt for the current state
-        
-        Returns: (dSheep, dWolf)
-        """
+        """Compute derivatives dSheep/dt and dWolf/dt for the current state."""
         sheep = max(0.0, sheep)
         wolves = max(0.0, wolves)
-        
-        # === 1. PREY (SHEEP) EQUATION ===
-        # dSheep = (Sheep_Birth_Rate * Sheep * (1 - Sheep/Carrying_Capacity)) - (Sheep * Age_Based_Mortality) - Predation_Rate - Disease - Competition - Stress + Migration
+
         logistic_growth = 0.0
-        # If population <= 1, cannot reproduce and will go extinct
         if sheep > 1 and self.carrying_capacity > 0:
-            effective_birth_rate = self.sheep_birth_rate * self.birth_multiplier
-            logistic_growth = effective_birth_rate * sheep * (1.0 - sheep / self.carrying_capacity)
-            logistic_growth = max(0.0, logistic_growth)  # Ensure non-negative
-        
-        # Age-based mortality using logistic function
+            logistic_growth = self.sheep_birth_rate * sheep * (1.0 - sheep / self.carrying_capacity)
+            logistic_growth = max(0.0, logistic_growth)
+
         sheep_mortality_rate = self.calculate_age_based_mortality(self.sheep_avg_age, self.sheep_lifespan)
-        sheep_death = sheep * sheep_mortality_rate * self.mortality_multiplier
-        
-        # Disease mortality
-        disease_death = sheep * self.disease_factor * self.mortality_multiplier
-        
-        # Intraspecific competition (density-dependent mortality)
+        sheep_death = sheep * sheep_mortality_rate
+        disease_death = sheep * self.disease_factor
         competition_death = self.sheep_competition * sheep * sheep
-        
-        # Environmental stress
-        stress_death = sheep * self.environmental_stress * self.stress_multiplier * 0.5
-        
-        # Calculate predation rate using Holling Type II with refuge
+        stress_death = sheep * self.environmental_stress * 0.5
         predation_rate = self.calculate_predation_rate(sheep, wolves)
-        
-        # Migration (net immigration/emigration)
         migration = sheep * self.migration_rate
-        
-        # Total change in sheep population
-        dSheep = logistic_growth - sheep_death - predation_rate - disease_death - competition_death - stress_death + migration
-        
-        # === 2. PREDATOR (WOLF) EQUATION ===
-        # dWolf = (Predation_Rate * Conversion_Efficiency) - (Wolf * Age_Based_Mortality) - Disease - Competition - Stress + Migration
-        # If population <= 1, cannot reproduce
-        # If wolves are not eating sheep (predation_rate == 0), they die off
+
+        dSheep = (
+            logistic_growth - sheep_death - predation_rate
+            - disease_death - competition_death - stress_death + migration
+        )
+
         wolf_birth = 0.0
         if wolves > 1 and predation_rate > 0:
-            wolf_birth = predation_rate * self.conversion_efficiency * self.conversion_multiplier
-        
+            wolf_birth = predation_rate * self.conversion_efficiency
+
         wolf_mortality_rate = self.calculate_age_based_mortality(self.wolf_avg_age, self.wolf_lifespan)
-        wolf_death = wolves * wolf_mortality_rate * self.mortality_multiplier
-        
-        # If wolves are not eating sheep, they die off (starvation)
+        wolf_death = wolves * wolf_mortality_rate
+
         if predation_rate == 0 and wolves > 0:
-            wolf_death = wolves  # All wolves die from starvation
-        
-        # Disease mortality
-        wolf_disease_death = wolves * self.disease_factor * self.mortality_multiplier
-        
-        # Intraspecific competition (territory competition)
+            wolf_death = wolves
+
+        wolf_disease_death = wolves * self.disease_factor
         wolf_competition_death = self.wolf_competition * wolves * wolves
-        
-        # Environmental stress
-        wolf_stress_death = wolves * self.environmental_stress * self.stress_multiplier * 0.5
-        
-        # Migration (net immigration/emigration)
+        wolf_stress_death = wolves * self.environmental_stress * 0.5
         wolf_migration = wolves * self.migration_rate
-        
-        dWolf = wolf_birth - wolf_death - wolf_disease_death - wolf_competition_death - wolf_stress_death + wolf_migration
-        
+
+        dWolf = (
+            wolf_birth - wolf_death - wolf_disease_death
+            - wolf_competition_death - wolf_stress_death + wolf_migration
+        )
         return (dSheep, dWolf)
 
-    def apply_demographic_noise(self, population):
-        """Add demographic stochasticity: dN += sigma * sqrt(N) * dW"""
-        if not self.probabilistic or self.noise_level <= 0 or population <= 0:
-            return population
-        # Scale noise so yearly variance is roughly noise_level^2 * N
-        shock = self.rng.gauss(0.0, self.noise_level * math.sqrt(population * self.dt))
-        return max(0.0, population + shock)
-    
     def runge_kutta_step(self, sheep, wolves):
-        """Perform one Runge-Kutta 4 (RK4) integration step
-        
-        Returns: (new_sheep, new_wolves)
-        """
+        """Perform one Runge-Kutta 4 (RK4) integration step."""
         dt = self.dt
-        
-        # k1: derivative at current point
+
         k1_sheep, k1_wolf = self.compute_derivatives(sheep, wolves)
-        
-        # k2: derivative at midpoint using k1
         k2_sheep, k2_wolf = self.compute_derivatives(
             sheep + 0.5 * dt * k1_sheep,
             wolves + 0.5 * dt * k1_wolf
         )
-        
-        # k3: derivative at midpoint using k2
         k3_sheep, k3_wolf = self.compute_derivatives(
             sheep + 0.5 * dt * k2_sheep,
             wolves + 0.5 * dt * k2_wolf
         )
-        
-        # k4: derivative at endpoint using k3
         k4_sheep, k4_wolf = self.compute_derivatives(
             sheep + dt * k3_sheep,
             wolves + dt * k3_wolf
         )
-        
-        # Weighted average of derivatives
-        dSheep = (dt / 6.0) * (k1_sheep + 2*k2_sheep + 2*k3_sheep + k4_sheep)
-        dWolf = (dt / 6.0) * (k1_wolf + 2*k2_wolf + 2*k3_wolf + k4_wolf)
-        
-        # Update populations
-        new_sheep = max(0.0, sheep + dSheep)
-        new_wolves = max(0.0, wolves + dWolf)
 
-        # Demographic stochasticity after the deterministic drift step
-        new_sheep = self.apply_demographic_noise(new_sheep)
-        new_wolves = self.apply_demographic_noise(new_wolves)
-        
-        return (new_sheep, new_wolves)
-    
+        dSheep = (dt / 6.0) * (k1_sheep + 2 * k2_sheep + 2 * k3_sheep + k4_sheep)
+        dWolf = (dt / 6.0) * (k1_wolf + 2 * k2_wolf + 2 * k3_wolf + k4_wolf)
+
+        return (max(0.0, sheep + dSheep), max(0.0, wolves + dWolf))
+
     def update_populations(self):
-        """Update populations using Runge-Kutta 4 (RK4) integration method"""
-        steps_per_year = int(1.0 / self.dt)  # 100 steps per year (dt=0.01)
-        
-        while True:
-            # Resample environmental random variables once per year
-            self.resample_environmental_noise()
+        """Update populations using RK4 integration, one year at a time."""
+        steps_per_year = int(1.0 / self.dt)
 
-            # Run integration steps for one year
+        while True:
             for _ in range(steps_per_year):
-                # Perform RK4 step
                 self.sheep_count, self.wolf_count = self.runge_kutta_step(
-                    self.sheep_count, 
+                    self.sheep_count,
                     self.wolf_count
                 )
-                
-                # Update average ages (simplified for RK4 - using midpoint estimate)
+
                 if self.sheep_count > 0:
-                    # Estimate birth rate for age tracking
                     logistic_growth = 0.0
                     if self.sheep_count > 1 and self.carrying_capacity > 0:
-                        effective_birth_rate = self.sheep_birth_rate * self.birth_multiplier
-                        logistic_growth = effective_birth_rate * self.sheep_count * (1.0 - self.sheep_count / self.carrying_capacity)
+                        logistic_growth = (
+                            self.sheep_birth_rate * self.sheep_count
+                            * (1.0 - self.sheep_count / self.carrying_capacity)
+                        )
                         logistic_growth = max(0.0, logistic_growth)
-                    
+
                     birth_fraction = (logistic_growth * self.dt) / max(self.sheep_count, 1.0)
-                    self.sheep_avg_age = (1.0 - birth_fraction) * (self.sheep_avg_age + self.dt) + birth_fraction * 0.0
+                    self.sheep_avg_age = (
+                        (1.0 - birth_fraction) * (self.sheep_avg_age + self.dt)
+                        + birth_fraction * 0.0
+                    )
                     self.sheep_avg_age = max(0.0, self.sheep_avg_age)
-                
+
                 if self.wolf_count > 0:
-                    # Estimate birth rate for age tracking
                     predation_rate = self.calculate_predation_rate(self.sheep_count, self.wolf_count)
                     wolf_birth = 0.0
                     if self.wolf_count > 1 and predation_rate > 0:
-                        wolf_birth = predation_rate * self.conversion_efficiency * self.conversion_multiplier
-                    
+                        wolf_birth = predation_rate * self.conversion_efficiency
+
                     birth_fraction = (wolf_birth * self.dt) / max(self.wolf_count, 1.0)
-                    self.wolf_avg_age = (1.0 - birth_fraction) * (self.wolf_avg_age + self.dt) + birth_fraction * 0.0
+                    self.wolf_avg_age = (
+                        (1.0 - birth_fraction) * (self.wolf_avg_age + self.dt)
+                        + birth_fraction * 0.0
+                    )
                     self.wolf_avg_age = max(0.0, self.wolf_avg_age)
-                
-                # Safety check: if population <= 1, set to 0 (extinction - cannot reproduce)
-                # Note: This takes precedence over refuge_size - if population drops to 1 or below, extinction occurs
+
                 if self.sheep_count <= 1:
                     self.sheep_count = 0.0
                     self.sheep_avg_age = 0.0
-                
+
                 if self.wolf_count <= 1:
                     self.wolf_count = 0.0
                     self.wolf_avg_age = 0.0
-                
-                # Safety check: wolves die if not eating sheep (starvation)
+
                 predation_rate_check = self.calculate_predation_rate(self.sheep_count, self.wolf_count)
                 if predation_rate_check == 0 and self.wolf_count > 0:
                     self.wolf_count = 0.0
                     self.wolf_avg_age = 0.0
-                
-                # Safety check: ensure sheep never go below refuge size (if refuge exists and population > 1)
-                # This only applies if population is above 1 (refuge protects from predation, not from extinction)
+
                 if self.refuge_size > 0 and self.sheep_count > 1:
                     self.sheep_count = max(self.refuge_size, self.sheep_count)
-            
-            # Yield after completing one year
+
             yield self.env.timeout(1)
-                
+
     def record_state(self, record_interval=1):
-        """Record current state of the ecosystem at specified intervals"""
+        """Record current state of the ecosystem at specified intervals."""
         while True:
             yield self.env.timeout(record_interval)
-            # Round to integers and ensure extinction is properly recorded
-            sheep = int(round(self.sheep_count))
-            wolves = int(round(self.wolf_count))
             self.history.append({
                 'time': self.env.now,
-                'sheep': sheep,
-                'wolves': wolves
+                'sheep': int(round(self.sheep_count)),
+                'wolves': int(round(self.wolf_count))
             })
+
 
 def run_simulation(initial_sheep=100, initial_wolves=20,
                   sheep_birth_rate=0.6, conversion_efficiency=0.2,
                   sheep_lifespan=11.0, wolf_lifespan=13.0,
                   predation_rate=0.1, carrying_capacity=800,
                   refuge_size=10.0,
-                  duration=500, disease_factor=0.0, 
+                  duration=500, disease_factor=0.0,
                   environmental_stress=0.0, sheep_competition=0.0,
-                  wolf_competition=0.0, migration_rate=0.0,
-                  probabilistic=False, noise_level=0.15, seed=None):
-    """Run the simulation using Modified Lotka-Volterra system
-    
-    Parameters (based on real-world ecological data):
-    - sheep_birth_rate: Annual reproduction rate (real: 0.5-0.75 per ewe/year)
-    - conversion_efficiency: Efficiency converting eaten sheep into wolf offspring
-    - sheep_lifespan: Expected lifespan of sheep in years (real: 10-12 years)
-    - wolf_lifespan: Expected lifespan of wolves in years (real: 12-14 years)
-    - predation_rate: Combined attack rate and handling time for Holling Type II predation
-    - carrying_capacity: Maximum sustainable sheep population
-    - refuge_size: Prey refuge - sheep below this count are safe from predation
-    - duration: Simulation duration in years
-    - probabilistic: If True, apply environmental and demographic random variables
-    - noise_level: Intensity of stochastic noise (typical: 0.05-0.4)
-    - seed: Optional RNG seed for reproducible probabilistic runs
-    """
+                  wolf_competition=0.0, migration_rate=0.0):
+    """Run one deterministic simulation with the given parameter values."""
     env = simpy.Environment()
-    rng = random.Random(seed)
     ecosystem = Ecosystem(
         env, initial_sheep, initial_wolves,
         sheep_birth_rate, conversion_efficiency,
@@ -351,148 +396,111 @@ def run_simulation(initial_sheep=100, initial_wolves=20,
         refuge_size,
         disease_factor, environmental_stress,
         sheep_competition, wolf_competition,
-        migration_rate,
-        probabilistic=probabilistic,
-        noise_level=noise_level,
-        rng=rng
+        migration_rate
     )
-    
-    # Determine recording interval based on duration
-    # For short durations: record every year
-    # For medium durations: record every 5 years
-    # For long durations: record every 10 years
+
     if duration <= 50:
-        record_interval = 1  # Every year
+        record_interval = 1
     elif duration <= 200:
-        record_interval = 5  # Every 5 years
+        record_interval = 5
     else:
-        record_interval = 10  # Every decade
-    
-    # Calculate start year (2026 - duration)
+        record_interval = 10
+
     start_year = 2026 - duration
-    
-    # Record initial state at time 0 (will be converted to calendar year later)
+
     ecosystem.history.append({
-        'time': 0.0,  # Simulation time, will convert to calendar year
+        'time': 0.0,
         'sheep': int(round(initial_sheep)),
         'wolves': int(round(initial_wolves))
     })
-    
-    # Start synchronized population update process
+
     env.process(ecosystem.update_populations())
     env.process(ecosystem.record_state(record_interval))
-    
-    # Run simulation
     env.run(until=duration)
-    
-    # Convert time values to calendar years
+
     for entry in ecosystem.history:
-        # entry['time'] is currently simulation time (0 to duration)
-        # Convert to calendar year
-        sim_time = entry['time']
-        calendar_year = start_year + sim_time
-        entry['time'] = int(round(calendar_year))
-    
+        entry['time'] = int(round(start_year + entry['time']))
+
     return ecosystem.history
+
+
+def extract_param_specs(data):
+    """Build distribution specs from API payload (nested or flat)."""
+    nested = data.get('parameters') if isinstance(data.get('parameters'), dict) else {}
+    specs = {}
+    for name in SAMPLABLE_PARAMS:
+        if name in nested:
+            specs[name] = nested[name]
+        elif name in data:
+            specs[name] = data[name]
+        else:
+            specs[name] = {'dist': 'fixed', 'value': PARAM_DEFAULTS[name]}
+        specs[name] = normalize_param_spec(name, specs[name])
+    return specs
+
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
+
 @app.route('/api/simulate', methods=['POST'])
 def simulate():
-    data = request.json
-    
-    # Extract parameters with defaults (updated to realistic values based on ecological studies)
-    initial_sheep = int(data.get('initial_sheep', 100))
-    initial_wolves = int(data.get('initial_wolves', 20))
-    sheep_birth_rate = float(data.get('sheep_birth_rate', 0.6))  # Real: 0.5-0.75 per ewe/year
-    conversion_efficiency = float(data.get('conversion_efficiency', 0.2))  # Real: ~0.03-0.05
-    sheep_lifespan = float(data.get('sheep_lifespan', 11.0))  # Real: 10-12 years
-    wolf_lifespan = float(data.get('wolf_lifespan', 13.0))  # Real: 12-14 years
-    predation_rate = float(data.get('predation_rate', 0.1))  # Combined attack rate and handling time
-    carrying_capacity = int(data.get('carrying_capacity', 800))  # Optimized for oscillations
-    refuge_size = float(data.get('refuge_size', 10.0))  # Prey refuge safety buffer
-    disease_factor = float(data.get('disease_factor', 0.0))
-    environmental_stress = float(data.get('environmental_stress', 0.0))
-    sheep_competition = float(data.get('sheep_competition', 0.0))
-    wolf_competition = float(data.get('wolf_competition', 0.0))
-    migration_rate = float(data.get('migration_rate', 0.0))
+    data = request.json or {}
+
     duration = int(data.get('duration', 500))
-    num_runs = int(data.get('num_runs', 1))
-    probabilistic = bool(data.get('probabilistic', False))
-    noise_level = float(data.get('noise_level', 0.15))
+    num_runs = max(1, int(data.get('num_runs', 1)))
     seed = data.get('seed', None)
     if seed is not None and seed != '':
         seed = int(seed)
     else:
         seed = None
 
-    # Deterministic mode: multiple runs are identical, so skip redundant work
-    if not probabilistic:
+    param_specs = extract_param_specs(data)
+    has_random = any(is_random_spec(spec) for spec in param_specs.values())
+    if not has_random:
         num_runs = 1
-    
-    # Run multiple simulations and average results
+
+    master_rng = random.Random(seed)
     all_runs = []
-    for run_idx in range(num_runs):
-        run_seed = None if seed is None else seed + run_idx
-        results = run_simulation(
-            initial_sheep=initial_sheep,
-            initial_wolves=initial_wolves,
-            sheep_birth_rate=sheep_birth_rate,
-            conversion_efficiency=conversion_efficiency,
-            sheep_lifespan=sheep_lifespan,
-            wolf_lifespan=wolf_lifespan,
-            predation_rate=predation_rate,
-            carrying_capacity=carrying_capacity,
-            refuge_size=refuge_size,
-            duration=duration,
-            disease_factor=disease_factor,
-            environmental_stress=environmental_stress,
-            sheep_competition=sheep_competition,
-            wolf_competition=wolf_competition,
-            migration_rate=migration_rate,
-            probabilistic=probabilistic,
-            noise_level=noise_level,
-            seed=run_seed
-        )
+    sampled_params = []
+
+    for _ in range(num_runs):
+        run_seed = master_rng.randrange(1 << 30)
+        run_rng = random.Random(run_seed)
+        params = sample_parameters(param_specs, run_rng)
+        sampled_params.append(params)
+        results = run_simulation(duration=duration, **params)
         all_runs.append(results)
-    
-    # Average across runs (round to nearest integer); include std when probabilistic ensemble
+
     if num_runs == 1:
-        averaged_results = all_runs[0]
+        series = all_runs[0]
     else:
-        averaged_results = []
+        series = []
         reference_times = [entry['time'] for entry in all_runs[0]]
-        
         for i, ref_time in enumerate(reference_times):
             sheep_vals = [run[i]['sheep'] for run in all_runs]
             wolf_vals = [run[i]['wolves'] for run in all_runs]
             avg_sheep = sum(sheep_vals) / num_runs
             avg_wolves = sum(wolf_vals) / num_runs
-            if num_runs > 1:
-                sheep_var = sum((v - avg_sheep) ** 2 for v in sheep_vals) / num_runs
-                wolf_var = sum((v - avg_wolves) ** 2 for v in wolf_vals) / num_runs
-                sheep_std = math.sqrt(sheep_var)
-                wolf_std = math.sqrt(wolf_var)
-            else:
-                sheep_std = 0.0
-                wolf_std = 0.0
-            averaged_results.append({
+            sheep_std = math.sqrt(sum((v - avg_sheep) ** 2 for v in sheep_vals) / num_runs)
+            wolf_std = math.sqrt(sum((v - avg_wolves) ** 2 for v in wolf_vals) / num_runs)
+            series.append({
                 'time': int(ref_time),
                 'sheep': int(round(avg_sheep)),
                 'wolves': int(round(avg_wolves)),
                 'sheep_std': round(sheep_std, 2),
-                'wolves_std': round(wolf_std, 2)
+                'wolves_std': round(wolf_std, 2),
             })
-    
+
     return jsonify({
-        'series': averaged_results,
-        'probabilistic': probabilistic,
-        'noise_level': noise_level,
-        'num_runs': num_runs
+        'series': series,
+        'probabilistic': has_random,
+        'num_runs': num_runs,
+        'parameter_specs': param_specs,
+        'sampled_parameters': sampled_params if has_random else sampled_params[:1],
     })
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
-
