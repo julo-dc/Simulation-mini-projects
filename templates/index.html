@@ -298,9 +298,31 @@
                 </div>
 
                 <div class="control-group">
+                    <label style="display: flex; align-items: center; cursor: pointer;">
+                        <input type="checkbox" id="probabilistic" style="margin-right: 8px; width: 16px; height: 16px; cursor: pointer;">
+                        <span>Probabilistic Mode</span>
+                    </label>
+                    <div class="hint">Adds environmental + demographic random variables</div>
+                </div>
+
+                <div id="probabilisticParams" style="display: none;">
+                    <div class="control-group">
+                        <label for="noise_level">Noise Level</label>
+                        <input type="number" id="noise_level" value="0.15" min="0" max="1" step="0.01">
+                        <div class="hint">Stochastic intensity (0 = none, ~0.15 typical, 0.4+ wild)</div>
+                    </div>
+
+                    <div class="control-group">
+                        <label for="seed">Random Seed (optional)</label>
+                        <input type="number" id="seed" value="" min="0" step="1" placeholder="blank = random">
+                        <div class="hint">Fixed seed makes probabilistic runs reproducible</div>
+                    </div>
+                </div>
+
+                <div class="control-group">
                     <label for="num_runs">Number of Runs</label>
                     <input type="number" id="num_runs" value="1" min="1" max="100">
-                    <div class="hint">Average results across runs (more = smoother, slower)</div>
+                    <div class="hint" id="num_runs_hint">Averaging only matters in probabilistic mode</div>
                 </div>
 
                 <div class="control-group" style="grid-column: span 2;">
@@ -372,6 +394,7 @@
         }
 
         function getFormData() {
+            const seedRaw = document.getElementById('seed').value;
             return {
                 initial_sheep: parseInt(document.getElementById('initial_sheep').value),
                 initial_wolves: parseInt(document.getElementById('initial_wolves').value),
@@ -388,28 +411,10 @@
                 wolf_competition: parseFloat(document.getElementById('wolf_competition').value),
                 migration_rate: parseFloat(document.getElementById('migration_rate').value),
                 duration: parseInt(document.getElementById('duration').value),
-                num_runs: parseInt(document.getElementById('num_runs').value)
-            };
-        }
-
-        function getFormData() {
-            return {
-                initial_sheep: parseInt(document.getElementById('initial_sheep').value),
-                initial_wolves: parseInt(document.getElementById('initial_wolves').value),
-                sheep_birth_rate: parseFloat(document.getElementById('sheep_birth_rate').value),
-                sheep_lifespan: parseFloat(document.getElementById('sheep_lifespan').value),
-                conversion_efficiency: parseFloat(document.getElementById('conversion_efficiency').value),
-                wolf_lifespan: parseFloat(document.getElementById('wolf_lifespan').value),
-                predation_rate: parseFloat(document.getElementById('predation_rate').value),
-                carrying_capacity: parseInt(document.getElementById('carrying_capacity').value),
-                refuge_size: parseFloat(document.getElementById('refuge_size').value),
-                disease_factor: parseFloat(document.getElementById('disease_factor').value),
-                environmental_stress: parseFloat(document.getElementById('environmental_stress').value),
-                sheep_competition: parseFloat(document.getElementById('sheep_competition').value),
-                wolf_competition: parseFloat(document.getElementById('wolf_competition').value),
-                migration_rate: parseFloat(document.getElementById('migration_rate').value),
-                duration: parseInt(document.getElementById('duration').value),
-                num_runs: parseInt(document.getElementById('num_runs').value)
+                num_runs: parseInt(document.getElementById('num_runs').value),
+                probabilistic: document.getElementById('probabilistic').checked,
+                noise_level: parseFloat(document.getElementById('noise_level').value),
+                seed: seedRaw === '' ? null : parseInt(seedRaw)
             };
         }
 
@@ -423,7 +428,7 @@
             errorDiv.style.display = 'block';
         }
 
-        function updateChart(data) {
+        function updateChart(data, meta = {}) {
             const ctx = document.getElementById('populationChart').getContext('2d');
             
             // Extract times and ensure they're calendar years (already converted in backend)
@@ -431,33 +436,89 @@
             // Round to integers and handle extinction
             const sheep = data.map(d => Math.round(d.sheep));
             const wolves = data.map(d => Math.round(d.wolves));
+            const hasStd = data.length > 0 && data.some(d => d.sheep_std != null || d.wolves_std != null);
+            const sheepUpper = hasStd ? data.map(d => Math.max(0, Math.round(d.sheep + (d.sheep_std || 0)))) : null;
+            const sheepLower = hasStd ? data.map(d => Math.max(0, Math.round(d.sheep - (d.sheep_std || 0)))) : null;
+            const wolvesUpper = hasStd ? data.map(d => Math.max(0, Math.round(d.wolves + (d.wolves_std || 0)))) : null;
+            const wolvesLower = hasStd ? data.map(d => Math.max(0, Math.round(d.wolves - (d.wolves_std || 0)))) : null;
 
             if (chart) {
                 chart.destroy();
             }
 
+            const datasets = [
+                {
+                    label: 'Sheep Population',
+                    data: sheep,
+                    borderColor: 'rgb(75, 192, 192)',
+                    backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                    tension: 0.4,
+                    fill: true
+                },
+                {
+                    label: 'Wolf Population',
+                    data: wolves,
+                    borderColor: 'rgb(255, 99, 132)',
+                    backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                    tension: 0.4,
+                    fill: true
+                }
+            ];
+
+            if (hasStd) {
+                datasets.push(
+                    {
+                        label: 'Sheep ±1σ',
+                        data: sheepUpper,
+                        borderColor: 'rgba(75, 192, 192, 0.25)',
+                        backgroundColor: 'rgba(75, 192, 192, 0.12)',
+                        pointRadius: 0,
+                        borderWidth: 1,
+                        fill: '+1',
+                        tension: 0.4
+                    },
+                    {
+                        label: 'Sheep lower',
+                        data: sheepLower,
+                        borderColor: 'rgba(75, 192, 192, 0.25)',
+                        backgroundColor: 'rgba(75, 192, 192, 0.12)',
+                        pointRadius: 0,
+                        borderWidth: 1,
+                        fill: false,
+                        tension: 0.4
+                    },
+                    {
+                        label: 'Wolves ±1σ',
+                        data: wolvesUpper,
+                        borderColor: 'rgba(255, 99, 132, 0.25)',
+                        backgroundColor: 'rgba(255, 99, 132, 0.12)',
+                        pointRadius: 0,
+                        borderWidth: 1,
+                        fill: '+1',
+                        tension: 0.4
+                    },
+                    {
+                        label: 'Wolves lower',
+                        data: wolvesLower,
+                        borderColor: 'rgba(255, 99, 132, 0.25)',
+                        backgroundColor: 'rgba(255, 99, 132, 0.12)',
+                        pointRadius: 0,
+                        borderWidth: 1,
+                        fill: false,
+                        tension: 0.4
+                    }
+                );
+            }
+
+            const modeLabel = meta.probabilistic
+                ? `Probabilistic${meta.num_runs > 1 ? ` (mean of ${meta.num_runs} runs)` : ''}`
+                : 'Deterministic';
+
             chart = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: times,
-                    datasets: [
-                        {
-                            label: 'Sheep Population',
-                            data: sheep,
-                            borderColor: 'rgb(75, 192, 192)',
-                            backgroundColor: 'rgba(75, 192, 192, 0.1)',
-                            tension: 0.4,
-                            fill: true
-                        },
-                        {
-                            label: 'Wolf Population',
-                            data: wolves,
-                            borderColor: 'rgb(255, 99, 132)',
-                            backgroundColor: 'rgba(255, 99, 132, 0.1)',
-                            tension: 0.4,
-                            fill: true
-                        }
-                    ]
+                    datasets: datasets
                 },
                 options: {
                     responsive: true,
@@ -508,7 +569,7 @@
                     plugins: {
                         title: {
                             display: true,
-                            text: 'Population Evolution Over Years',
+                            text: `Population Evolution Over Years — ${modeLabel}`,
                             font: {
                                 size: 14
                             }
@@ -519,6 +580,9 @@
                             labels: {
                                 font: {
                                     size: 11
+                                },
+                                filter: function(item) {
+                                    return !item.text.includes('lower');
                                 }
                             }
                         }
@@ -578,9 +642,11 @@
         async function runSimulation() {
             const button = document.getElementById('runSimulation');
             const params = getFormData();
-            const numRuns = params.num_runs;
+            const numRuns = params.probabilistic ? params.num_runs : 1;
             button.disabled = true;
-            button.textContent = `Running ${numRuns} simulation${numRuns > 1 ? 's' : ''}...`;
+            button.textContent = params.probabilistic
+                ? `Running ${numRuns} probabilistic simulation${numRuns > 1 ? 's' : ''}...`
+                : 'Running deterministic simulation...';
             hideError();
 
             try {
@@ -596,8 +662,13 @@
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
 
-                const data = await response.json();
-                updateChart(data);
+                const payload = await response.json();
+                // Support both new {series:...} and legacy array responses
+                const data = Array.isArray(payload) ? payload : (payload.series || []);
+                const meta = Array.isArray(payload)
+                    ? { probabilistic: params.probabilistic, num_runs: numRuns }
+                    : payload;
+                updateChart(data, meta);
                 updateStats(data);
             } catch (error) {
                 showError('Error running simulation: ' + error.message);
@@ -608,10 +679,24 @@
             }
         }
 
+        function syncProbabilisticControls() {
+            const enabled = document.getElementById('probabilistic').checked;
+            document.getElementById('probabilisticParams').style.display = enabled ? 'block' : 'none';
+            document.getElementById('num_runs_hint').textContent = enabled
+                ? 'Average results across stochastic runs (more = smoother mean, slower)'
+                : 'Averaging only matters in probabilistic mode';
+            document.getElementById('num_runs').disabled = !enabled;
+            if (!enabled) {
+                document.getElementById('num_runs').value = 1;
+            }
+        }
+
         document.getElementById('runSimulation').addEventListener('click', runSimulation);
         
         // Update year range when duration changes
         document.getElementById('duration').addEventListener('input', updateYearRange);
+
+        document.getElementById('probabilistic').addEventListener('change', syncProbabilisticControls);
         
         // Toggle advanced parameters visibility
         document.getElementById('showAdvancedParams').addEventListener('change', function() {
@@ -625,10 +710,12 @@
         
         // Initialize year range on page load
         updateYearRange();
+        syncProbabilisticControls();
 
         // Run initial simulation on page load
         window.addEventListener('load', () => {
             updateYearRange();
+            syncProbabilisticControls();
             runSimulation();
         });
     </script>
